@@ -5,7 +5,7 @@
     "license": "MIT",
     "keywords": ["klxm-studio", "klxm-studio-extension", "design-tokens", "dtcg", "theme", "kit", "wcag", "contrast", "figma"],
     "homepage": "https://studio.klxm.de",
-    "support": { "source": "https://github.com/KLXM-Opensource/studio-kit-designer", "issues": "https://github.com/KLXM-Opensource/studio-kit-designer/issues" },
+    "support": { "source": "https://github.com/KLXM-Studio/studio-kit-designer", "issues": "https://github.com/KLXM-Studio/studio-kit-designer/issues" },
     "authors": [{ "name": "KLXM Crossmedia GmbH and contributors" }],
     "require": { "php": ">=8.4.1" },
     "extra": { "klxm-studio": { "entry": "extension.php", "requires-core": ">=1.0.0" } }

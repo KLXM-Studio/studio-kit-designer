@@ -1,0 +1,36 @@
+{
+  "global": {
+    "colors": {
+      "teal": { "700": { "value": "#0F5E63", "type": "color" }, "300": { "value": "#7FD3CF", "type": "color" } },
+      "sand": { "100": { "value": "#FBF6EE", "type": "color" }, "200": { "value": "#F1E8DA", "type": "color" } }
+    },
+    "fontFamilies": {
+      "heading": { "value": "Fraunces", "type": "fontFamilies" },
+      "body": { "value": "Source Sans 3", "type": "fontFamilies" }
+    },
+    "fontWeights": { "heading": { "value": "SemiBold", "type": "fontWeights" } },
+    "fontSizes": { "body": { "value": "18", "type": "fontSizes" } },
+    "lineHeights": { "body": { "value": "155%", "type": "lineHeights" } },
+    "borderRadius": { "md": { "value": "6", "type": "borderRadius" } }
+  },
+  "light": {
+    "color": {
+      "primary": { "value": "{colors.teal.700}", "type": "color" },
+      "on-primary": { "value": "#FFFFFF", "type": "color" },
+      "background": { "value": "#FFFFFF", "type": "color" },
+      "surface": { "value": "{colors.sand.100}", "type": "color" },
+      "border": { "value": "{colors.sand.200}", "type": "color" },
+      "text": { "default": { "value": "#2A2F33", "type": "color" }, "muted": { "value": "#5B6166", "type": "color" } },
+      "heading": { "value": "#111518", "type": "color" }
+    }
+  },
+  "dark": {
+    "color": {
+      "primary": { "value": "{colors.teal.300}", "type": "color" },
+      "on-primary": { "value": "#062A2B", "type": "color" },
+      "background": { "value": "#0E1314", "type": "color" }
+    }
+  },
+  "$themes": [],
+  "$metadata": { "tokenSetOrder": ["global", "light", "dark"] }
+}

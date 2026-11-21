@@ -1,0 +1,12 @@
+{
+    "name": "klxm/studio-kit-designer",
+    "description": "KLXM Studio – Kit-Designer: Kits visuell gestalten (Farben mit Kontrastprüfung und Dunkel-Vorschlag, Schriften, Abstände, Formen), Vorschau mit echten Seiten auf drei Größen hell und dunkel, Design-Tokens im W3C-Format (DTCG) aus Figma/Tokens Studio, Export als Kind-Kit von fluid für KLXM Studio und REDAXO fluid",
+    "type": "klxm-studio-extension",
+    "license": "MIT",
+    "keywords": ["klxm-studio", "klxm-studio-extension", "design-tokens", "dtcg", "theme", "kit", "wcag", "contrast", "figma"],
+    "homepage": "https://studio.klxm.de",
+    "support": { "source": "https://github.com/KLXM-Opensource/studio-kit-designer", "issues": "https://github.com/KLXM-Opensource/studio-kit-designer/issues" },
+    "authors": [{ "name": "KLXM Crossmedia GmbH and contributors" }],
+    "require": { "php": ">=8.4.1" },
+    "extra": { "klxm-studio": { "entry": "extension.php", "requires-core": ">=1.0.0" } }
+}

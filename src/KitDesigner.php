@@ -68,10 +68,23 @@ final class KitDesigner
      */
     public static function withParent(callable $fn): mixed
     {
+        return self::withKit(self::parentTheme(), $fn);
+    }
+
+    /**
+     * $fn mit einem beliebigen Kit als aktivem Kit ausführen – Core mit Theme::withKit (stellt auch Design-Zustand und Standardwerte
+     * der Kit-Einstellungen wieder her), sonst wie in Stufe 1 (Kit, Design::override, currentPage).
+     * @template T
+     * @param callable(): T $fn
+     * @return T
+     */
+    public static function withKit(Theme|string $kit, callable $fn): mixed
+    {
+        if (method_exists(Theme::class, 'withKit')) return Theme::withKit($kit, fn() => $fn());
         $app = app();
         $saved = $app->theme;
         $page = $app->currentPage ?? null;
-        $app->theme = self::parentTheme();
+        $app->theme = $kit instanceof Theme ? $kit : new Theme($kit);
         try {
             return $fn();
         } finally {
@@ -125,6 +138,18 @@ final class KitDesigner
 
     // ------------------------------------------------------------------ Eigene Angaben (nicht im Eltern-Kit)
 
+    /** Hat das Eltern-Kit die Zeilenhöhe als Token (fluid ab Core 1.0.0 mit --f-lh)? Dann braucht der Export kein eigenes CSS dafür. */
+    public static function lineHeightToken(): bool
+    {
+        return isset(self::tokens()['line_height']);
+    }
+
+    /** Lädt der Core eigene Stylesheets eines Kind-Kits zusätzlich ('css' => [...], Theme::kitStylesheets)? */
+    public static function coreKitCss(): bool
+    {
+        return method_exists(Theme::class, 'kitStylesheets');
+    }
+
     /** Eigene Angaben mit Grenzen: Zeilenhöhe des Fließtexts */
     public const EXTRA = ['line_height' => ['min' => 1.2, 'max' => 2.0, 'step' => 0.02, 'default' => self::PARENT_LINE_HEIGHT]];
 
@@ -143,6 +168,7 @@ final class KitDesigner
     {
         $extra = self::normalizeExtra($extra);
         $rules = [];
+        if (self::lineHeightToken()) return '';   // Zeilenhöhe steckt dann im Token line_height (design_defaults)
         if (abs($extra['line_height'] - self::PARENT_LINE_HEIGHT) > 0.0001) {
             $rules[] = 'body{line-height:' . rtrim(rtrim(number_format($extra['line_height'], 3, '.', ''), '0'), '.') . '}';
         }

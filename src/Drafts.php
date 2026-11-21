@@ -14,7 +14,8 @@ use Core\Db\Table;
  *   kit_designer_versions  jeder gespeicherte Stand (Daten, Notiz, Person, Zeitpunkt) – Wiederherstellen legt eine neue Version an
  *
  * Daten eines Entwurfs: ['parent' => 'fluid', 'values' => Design-Werte des Eltern-Kits (normalisiert, „token@dark“ für dunkel),
- *   'extra' => ['line_height' => …], 'auto' => [token => true] (Dunkel-Wert folgt dem Vorschlag), 'meta' => [description, author]]
+ *   'extra' => ['line_height' => …], 'auto' => [token => true] (Dunkel-Wert folgt dem Vorschlag), 'meta' => [description, author],
+ *   'styles' => Stile für Elemente, Blöcke und Abschnitts-Stile (Klxm\KitDesigner\Styles)]
  */
 final class Drafts
 {
@@ -65,10 +66,19 @@ final class Drafts
         $auto = [];
         foreach ((array) ($in['auto'] ?? []) as $k => $v) if (in_array($k, $colors, true) && $v) $auto[$k] = true;
         $meta = (array) ($in['meta'] ?? []);
+        $extra = KitDesigner::normalizeExtra((array) ($in['extra'] ?? []));
+        // fluid mit Token line_height: die eigene Angabe aus Stufe 1 wandert in das Token (und bleibt gleich)
+        if (KitDesigner::lineHeightToken()) {
+            if (abs($extra['line_height'] - KitDesigner::PARENT_LINE_HEIGHT) > 0.0001 && abs((float) $values['line_height'] - KitDesigner::PARENT_LINE_HEIGHT) < 0.0001) {
+                $values = KitDesigner::normalize(['line_height' => $extra['line_height']] + $values);
+            }
+            $extra['line_height'] = (float) $values['line_height'];
+        }
         return [
             'parent' => KitDesigner::PARENT,
             'values' => $values,
-            'extra' => KitDesigner::normalizeExtra((array) ($in['extra'] ?? [])),
+            'extra' => $extra,
+            'styles' => Styles::normalize((array) ($in['styles'] ?? [])),
             'auto' => $auto,
             'meta' => [
                 'description' => mb_substr(trim(strip_tags((string) ($meta['description'] ?? ''))), 0, 300),
@@ -132,6 +142,7 @@ final class Drafts
     {
         app()->db->transaction(function () use ($id): void {
             app()->db->query('DELETE FROM ' . self::VERSIONS . ' WHERE draft_id = ?', [$id]);
+            Shares::deleteFor($id);
             app()->db->query('DELETE FROM ' . self::DRAFTS . ' WHERE id = ?', [$id]);
         });
     }
@@ -148,7 +159,7 @@ final class Drafts
         $data = (array) (json_decode((string) ($row['data'] ?? ''), true) ?: []);
         return ['id' => (int) $row['id'], 'name' => (string) $row['name'], 'label' => (string) $row['label'], 'version' => (int) $row['version'],
             'created_by' => (string) $row['created_by'], 'created_at' => (string) $row['created_at'], 'updated_at' => (string) $row['updated_at'],
-            'data' => $data + ['values' => [], 'extra' => [], 'auto' => [], 'meta' => []]];
+            'data' => $data + ['values' => [], 'extra' => [], 'auto' => [], 'meta' => [], 'styles' => ['scopes' => [], 'sections' => []]]];
     }
 
     /** @return array{0: string, 1: string} Titel, technischer Name */

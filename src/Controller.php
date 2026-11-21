@@ -6,6 +6,7 @@ declare(strict_types=1);
 namespace Klxm\KitDesigner;
 
 use Core\Design;
+use Core\Http\Controllers\Admin\AdminController;
 use Core\Http\Controllers\Admin\DesignController;
 use Core\Http\Controllers\SiteController;
 use Core\Http\HttpException;
@@ -47,7 +48,7 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
     {
         $this->guard();
         return KitDesigner::page('index', ['drafts' => Drafts::all(), 'presets' => KitDesigner::presets(), 'siteFluid' => self::siteUsesParent(),
-            'siteKit' => app()->theme->label()]);
+            'siteKit' => app()->theme->label(), 'kits' => Importer::kits()]);
     }
 
     public function create(Request $r): Response
@@ -65,6 +66,12 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
         } elseif ($start === 'site' && self::siteUsesParent()) {
             $values = array_replace($values, Design::values());
             $note = __('Design dieser Website');
+        } elseif ($start === 'kit' || $start === 'zip') {
+            $src = $start === 'kit' ? Importer::fromKit((string) ($r->post['kit'] ?? '')) : Importer::fromZip(self::uploaded($r, 'zip', 20));
+            if (!$src['ok']) return $this->to(KitDesigner::ADMIN, 'error', $src['message']);
+            $label = $label !== '' ? $label : $src['label'];
+            $id = Drafts::create($label, (string) ($r->post['name'] ?? '') ?: $src['name'], $src['data'], $src['note']);
+            return $this->to(KitDesigner::ADMIN . '/' . $id, 'success', $src['message']);
         } elseif ($start === 'import') {
             $json = json_decode(self::uploaded($r) ?? (string) ($r->post['json'] ?? ''), true);
             if (!is_array($json)) return $this->to(KitDesigner::ADMIN, 'error', __('Die Datei enthält kein gültiges JSON.'));
@@ -99,7 +106,7 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
         try {
             $v = Drafts::save($d['id'], (string) ($r->post['label'] ?? $d['label']), isset($r->post['name']) ? (string) $r->post['name'] : null,
                 ['values' => (array) ($r->post['values'] ?? []), 'extra' => (array) ($r->post['extra'] ?? []), 'auto' => (array) ($r->post['auto'] ?? []),
-                    'meta' => (array) ($r->post['meta'] ?? [])], (string) ($r->post['note'] ?? ''));
+                    'meta' => (array) ($r->post['meta'] ?? []), 'styles' => (array) ($r->post['styles'] ?? [])], (string) ($r->post['note'] ?? ''));
         } catch (\Throwable $e) {
             return Response::fail($e->getMessage());
         }
@@ -127,11 +134,14 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
         $this->guard();
         $in = (array) ($r->post['values'] ?? []);
         $extra = KitDesigner::normalizeExtra((array) ($r->post['extra'] ?? []));
+        $styles = Styles::normalize((array) ($r->post['styles'] ?? []));
         $pageId = (string) ($r->post['page'] ?? '');
         $mode = (string) ($r->post['mode'] ?? 'full');
-        return KitDesigner::withParent(function () use ($in, $extra, $pageId, $mode): Response {
+        $source = (string) ($r->post['source'] ?? 'examples');
+        return KitDesigner::withParent(function () use ($in, $extra, $styles, $pageId, $mode, $source): Response {
             $values = Design::normalize($in);
-            $extraCss = KitDesigner::extraCss($extra);
+            $extraCss = trim(KitDesigner::extraCss($extra) . "\n" . Styles::css($styles, null, true));
+            $checks = Styles::checks($styles, $values);
             $force = trim((string) (Design::def()['dark']['force'] ?? ''));
             // Klassen des Hell/Dunkel-Schalters des Kits (fluid: scheme-light/scheme-dark) – Zeichenflächen „hell“ bleiben so auch
             // bei dunkel eingestelltem Gerät hell, „dunkel“ zeigt die dunklen Werte samt abgeleiteter Farben wie die Website
@@ -142,25 +152,40 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
             if ($mode === 'live') {
                 $live = Design::live($values);
                 return Response::json(['ok' => true, 'css' => $live['css'], 'classes' => $live['classes'], 'fonts' => $live['fonts'], 'opt' => $live['opt'],
-                    'darkCss' => $darkStyle, 'force' => $force, 'scheme' => $scheme, 'extraCss' => $extraCss]);
+                    'darkCss' => $darkStyle, 'force' => $force, 'scheme' => $scheme, 'extraCss' => $extraCss, 'checks' => $checks]);
             }
             Design::override($values);
-            $page = ctype_digit($pageId) ? Pages::find((int) $pageId) : null;
-            $page ??= Pages::home();
-            if (!$page) return Response::fail(__('Diese Website hat noch keine Startseite – legen Sie zuerst Inhalte an.'), 404);
-            $html = (new SiteController())->previewHtml($page);
+            $items = $missing = [];
+            if ($mode === 'gallery') {
+                $g = Gallery::build($source, $styles['sections']);
+                [$items, $missing] = [$g['items'], $g['missing']];
+                try {
+                    $html = Gallery::page($g['blocks']);
+                } catch (\RuntimeException $e) {
+                    return Response::fail($e->getMessage(), 404);
+                }
+                $page = ['id' => 0];
+            } else {
+                $page = ctype_digit($pageId) ? Pages::find((int) $pageId) : null;
+                $page ??= Pages::home();
+                if (!$page) return Response::fail(__('Diese Website hat noch keine Startseite – legen Sie zuerst Inhalte an.'), 404);
+                $html = (new SiteController())->previewHtml($page);
+            }
             $html = self::inject($html, $extraCss);
             return Response::json(['ok' => true, 'light' => $html, 'dark' => DesignController::forceDark($html, $values), 'page' => (int) $page['id'],
-                'darkCss' => $darkStyle, 'force' => $force, 'scheme' => $scheme]);
+                'darkCss' => $darkStyle, 'force' => $force, 'scheme' => $scheme, 'checks' => $checks, 'items' => $items, 'missing' => $missing]);
         });
     }
 
-    /** Eigenes CSS des Entwurfs direkt nach dem Grund-CSS des Kits einsetzen (gleiche Stelle wie im exportierten Kit) */
+    /**
+     * Eigenes CSS des Entwurfs dort einsetzen, wo das exportierte Kit es lädt: nach Grund-, Options- und Block-CSS, vor der
+     * Design-Datei der Website (wie 'css' => ['css/kit.css']); ohne Design-Datei vor </head>.
+     */
     public static function inject(string $html, string $extraCss): string
     {
-        $style = '<style data-kd-extra>' . $extraCss . '</style>';
+        $style = '<style data-kd-extra>' . str_ireplace('</style', '<\/style', $extraCss) . '</style>';
         $n = 0;
-        $out = preg_replace('~(<link rel="stylesheet" href="[^"]*/css/site\.css[^"]*">)~', '$1' . $style, $html, 1, $n);
+        $out = preg_replace('~(<style data-design-preview>|<link rel="stylesheet" href="[^"]*/design/design-[^"]*">)~', $style . '$1', $html, 1, $n);
         if (!$n) $out = preg_replace('~</head>~i', $style . '</head>', $html, 1);
         return (string) $out;
     }
@@ -172,6 +197,13 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
         $values = KitDesigner::normalize((array) ($r->post['values'] ?? []));
         $tokens = KitDesigner::tokens();
         $action = (string) ($r->post['action'] ?? 'dark');
+        if ($action === 'fixpair') {
+            $fg = Palette::hex((string) ($r->post['fg'] ?? ''));
+            $bg = Palette::hex((string) ($r->post['bg'] ?? ''));
+            if ($fg === null || $bg === null) return Response::fail(__('Dieses Farbpaar gibt es nicht.'));
+            $min = max(Palette::AA_LARGE, min(7.0, (float) ($r->post['min'] ?? Palette::AA_TEXT)));
+            return Response::json(['ok' => true, 'value' => Palette::fix($fg, $bg, $min)]);
+        }
         if ($action === 'fix') {
             $token = (string) ($r->post['token'] ?? '');
             $mode = (string) ($r->post['mode'] ?? 'light');
@@ -264,6 +296,72 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
         return Response::json($res + ['check' => $check, 'kitsUrl' => url('/admin/system/kits')], $res['ok'] ? 200 : 422);
     }
 
+    // ------------------------------------------------------------------ Vorschau-Links (teilen)
+
+    /** Vorschau-Link für die zuletzt gespeicherte Version anlegen – Token nur in dieser Antwort */
+    public function shareCreate(Request $r, string $id): Response
+    {
+        $d = $this->draftOr404($id);
+        $u = app()->auth->user();
+        $res = Shares::create($d['id'], (int) $d['version'], (int) ($r->post['days'] ?? 7), (string) ($r->post['note'] ?? ''), (string) (($u['name'] ?? '') ?: ($u['email'] ?? '')));
+        return Response::json(['ok' => true, 'url' => absolute_url(Shares::PATH . '/' . $res['token']), 'expires_at' => $res['expires_at'], 'version' => (int) $d['version'],
+            'shares' => Shares::list($d['id']), 'message' => __('Vorschau-Link angelegt – er wird nur jetzt angezeigt.')]);
+    }
+
+    public function shareRevoke(Request $r, string $id, string $sid): Response
+    {
+        $d = $this->draftOr404($id);
+        if (!ctype_digit($sid)) throw new HttpException(404);
+        Shares::revoke($d['id'], (int) $sid);
+        return Response::json(['ok' => true, 'shares' => Shares::list($d['id']), 'message' => __('Vorschau-Link widerrufen.')]);
+    }
+
+    /**
+     * Öffentliche Vorschau (ohne Anmeldung, nur lesend): Seite der Website mit dem Stand der freigegebenen Version, hell oder
+     * dunkel, Telefon/Tablet/Desktop – in einem Rahmen ohne Skripte. Ungültige Tokens: 404, mit Begrenzung je IP.
+     */
+    public function shareView(Request $r, string $token): Response
+    {
+        if (!KitDesigner::on() || !KitDesigner::parentAvailable()) throw new HttpException(404);
+        $limiter = new \Core\RateLimiter(app()->db);
+        $key = 'kd-share:' . $r->ip();
+        if ($limiter->tooMany($key, 30, 900)) return AdminController::secure(new Response(e(__('Zu viele Versuche. Bitte später erneut.')), 429, ['Content-Type' => 'text/plain; charset=utf-8']));
+        $share = Shares::find($token);
+        $draft = $share ? Drafts::find((int) $share['draft_id']) : null;
+        $ver = $draft ? Drafts::version($draft['id'], (int) $share['version']) : null;
+        if (!$share || !$draft || !$ver) {
+            $limiter->hit($key);
+            return AdminController::secure(new Response(e(__('Dieser Vorschau-Link ist ungültig oder abgelaufen.')), 404, ['Content-Type' => 'text/plain; charset=utf-8']))
+                ->header('Referrer-Policy', 'no-referrer');
+        }
+        Shares::touch((int) $share['id']);
+        $data = $ver['data'];
+        $pages = array_values(array_filter(Pages::published(), fn($p) => ($p['type'] ?? 'page') === 'page'));
+        $pageId = (int) ($r->query['seite'] ?? 0);
+        $page = null;
+        foreach ($pages as $p) if ((int) $p['id'] === $pageId) $page = $p;
+        $page ??= Pages::home() ?? ($pages[0] ?? null);
+        $dark = ($r->query['modus'] ?? '') === 'dunkel';
+        $dev = in_array($r->query['geraet'] ?? '', ['telefon', 'tablet', 'desktop'], true) ? (string) $r->query['geraet'] : 'desktop';
+        $html = '';
+        if ($page) {
+            $html = KitDesigner::withParent(function () use ($data, $page, $dark): string {
+                $values = Design::normalize((array) $data['values']);
+                Design::override($values);
+                $h = self::inject((new SiteController())->previewHtml($page), trim(KitDesigner::extraCss((array) $data['extra']) . "\n" . Styles::css((array) ($data['styles'] ?? []))));
+                $manual = (array) (Design::def()['dark']['manual'] ?? []);
+                $cls = (string) ($manual[$dark ? 'dark' : 'light'] ?? '');
+                if ($dark) $h = DesignController::forceDark($h, $values);
+                if ($cls !== '') $h = (string) preg_replace('~<html\b([^>]*)\bclass="([^"]*)"~i', '<html$1class="$2 ' . $cls . '"', $h, 1);
+                // nur lesend: ohne Skripte (der Rahmen erlaubt sie ohnehin nicht)
+                return (string) preg_replace('~<script\b[^>]*>.*?</script>~is', '', $h);
+            });
+        }
+        $view = \Core\Theme::capture(KitDesigner::dir() . '/views/share.php', ['draft' => $draft, 'share' => $share, 'pages' => $pages, 'page' => $page, 'dark' => $dark,
+            'dev' => $dev, 'html' => $html, 'self' => Shares::PATH . '/' . $token]);
+        return AdminController::secure(new Response($view))->header('Referrer-Policy', 'no-referrer');
+    }
+
     // ------------------------------------------------------------------ Daten für die Arbeitsfläche
 
     /** Nutzt die Website fluid oder ein Kind-Kit davon? (dann passt „Design dieser Website“ als Start) */
@@ -272,10 +370,10 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
         return isset(app()->theme->chain[KitDesigner::PARENT]);
     }
 
-    private static function uploaded(Request $r): ?string
+    private static function uploaded(Request $r, string $field = 'file', int $mb = 2): ?string
     {
-        $f = $r->files['file'] ?? null;
-        if (!is_array($f) || ($f['error'] ?? 1) !== UPLOAD_ERR_OK || (int) ($f['size'] ?? 0) > 2 * 1024 * 1024) return null;
+        $f = $r->files[$field] ?? null;
+        if (!is_array($f) || ($f['error'] ?? 1) !== UPLOAD_ERR_OK || (int) ($f['size'] ?? 0) > $mb * 1024 * 1024) return null;
         $s = file_get_contents((string) $f['tmp_name']);
         return $s === false ? null : $s;
     }
@@ -303,7 +401,7 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
                 'type' => $t['type'] ?? 'color', 'label' => $tr($t['label'] ?? $n), 'help' => $tr($t['help'] ?? ''),
                 'min' => $t['min'] ?? null, 'max' => $t['max'] ?? null, 'step' => $t['step'] ?? null, 'unit' => $t['unit'] ?? null,
                 'options' => isset($t['options']) ? array_map($tr, (array) $t['options']) : null, 'dark' => isset($t['dark']) ? true : null,
-                'contrast' => $t['contrast'] ?? null, 'markup' => !empty($t['markup']) ? true : null, 'group' => $t['group'] ?? null,
+                'contrast' => $t['contrast'] ?? null, 'markup' => !empty($t['markup']) ? true : null, 'group' => $t['group'] ?? null, 'var' => $t['var'] ?? null,
             ], fn($v) => $v !== null && $v !== '');
         }
         $fonts = [];
@@ -320,10 +418,17 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
         $presets = [];
         foreach (KitDesigner::presets() as $k => $p) $presets[] = ['key' => $k, 'label' => $tr($p['label']), 'description' => $tr($p['description']), 'values' => KitDesigner::normalize($p['values'])];
         $base = url(KitDesigner::ADMIN . '/' . $d['id']);
+        $blocks = [];
+        foreach ((array) (KitDesigner::parentTheme()->def['blocks'] ?? []) as $type => $b) {
+            if (!is_array($b)) continue;
+            $blocks[(string) $type] = ['label' => $tr((string) ($b['label'] ?? $type)), 'variants' => array_map(fn($l) => $tr((string) $l), (array) ($b['variants'] ?? []))];
+        }
         return [
             'draft' => ['id' => $d['id'], 'name' => $d['name'], 'label' => $d['label'], 'version' => $d['version'],
                 'values' => KitDesigner::normalize((array) $d['data']['values']), 'extra' => KitDesigner::normalizeExtra((array) $d['data']['extra']),
-                'auto' => (object) $d['data']['auto'], 'meta' => (object) $d['data']['meta']],
+                'auto' => (object) $d['data']['auto'], 'meta' => (object) $d['data']['meta'], 'styles' => Styles::normalize((array) ($d['data']['styles'] ?? []))],
+            'catalog' => Styles::catalog(), 'blocks' => $blocks, 'lineHeightToken' => KitDesigner::lineHeightToken(),
+            'backgrounds' => array_map($tr, (array) (KitDesigner::parentTheme()->def['backgrounds'] ?? [])), 'shares' => Shares::list($d['id']), 'shareDays' => Shares::DAYS,
             'tokens' => $tokens, 'defaults' => KitDesigner::defaults(), 'fonts' => $fonts, 'presets' => $presets, 'pages' => $pages,
             'markup' => KitDesigner::markupTokens(), 'extra' => KitDesigner::EXTRA, 'versions' => Drafts::versions($d['id']),
             'siteKit' => app()->theme->name, 'siteUsesParent' => self::siteUsesParent(),
@@ -331,7 +436,8 @@ final class Controller extends \Core\Http\Controllers\Admin\AdminController
             'aa' => ['text' => Palette::AA_TEXT, 'ui' => Palette::AA_LARGE],
             'urls' => ['preview' => url(KitDesigner::ADMIN . '/api/vorschau'), 'palette' => url(KitDesigner::ADMIN . '/api/farben'),
                 'save' => $base . '/speichern', 'version' => $base . '/version/', 'tokensExport' => $base . '/tokens.json', 'tokensImport' => $base . '/tokens',
-                'zipStudio' => $base . '/export/studio', 'zipRedaxo' => $base . '/export/redaxo', 'install' => $base . '/installieren', 'kits' => url('/admin/system/kits')],
+                'zipStudio' => $base . '/export/studio', 'zipRedaxo' => $base . '/export/redaxo', 'install' => $base . '/installieren', 'kits' => url('/admin/system/kits'),
+                'share' => $base . '/teilen', 'shareRevoke' => $base . '/teilen/'],
         ];
     }
 }

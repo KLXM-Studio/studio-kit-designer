@@ -54,10 +54,11 @@ final class Exporter
         return $out;
     }
 
-    /** Sperre: nicht bestandene Kontrastpaare (leer = Export erlaubt) */
+    /** Sperre: nicht bestandene Kontrastpaare der Farben und der Stile (Zustände, Abschnitts-Stile) – leer = Export erlaubt */
     public static function blockers(array $draft): array
     {
-        return Palette::failures(KitDesigner::normalize((array) ($draft['data']['values'] ?? [])), KitDesigner::tokens());
+        $values = KitDesigner::normalize((array) ($draft['data']['values'] ?? []));
+        return [...Palette::failures($values, KitDesigner::tokens()), ...Styles::failures((array) ($draft['data']['styles'] ?? []), $values)];
     }
 
     // ------------------------------------------------------------------ Studio
@@ -70,6 +71,12 @@ final class Exporter
         $meta = (array) ($draft['data']['meta'] ?? []);
         $values = (array) ($draft['data']['values'] ?? []);
         $extraCss = KitDesigner::extraCss((array) ($draft['data']['extra'] ?? []));
+        $styles = (array) ($draft['data']['styles'] ?? []);
+        $parts = Styles::cssParts($styles);
+        $global = trim(implode("\n", array_filter([$extraCss, $parts[''] ?? ''])));
+        unset($parts['']);
+        $bgs = Styles::backgrounds($styles, KitDesigner::normalize($values));
+        $ownCss = KitDesigner::coreKitCss();   // Core lädt 'css' zusätzlich – sonst css/site.css mit @import von fluid
         $dd = self::designDefaults($values);
         $desc = (string) ($meta['description'] ?? '') !== '' ? (string) $meta['description'] : 'Kind-Kit von fluid, gestaltet mit dem Kit-Designer.';
         $date = date('Y-m-d');
@@ -78,16 +85,23 @@ final class Exporter
             . " * Alles, was hier fehlt – Blöcke, Vorlagen, Kopf und Fuß, CSS, Style-Editor –, kommt von fluid; Korrekturen an fluid kommen\n"
             . " * so automatisch an. 'design_defaults' setzt nur die Standardwerte, die vom Eltern-Kit abweichen (Farben hell und dunkel).\n"
             . " * Redakteure ändern sie weiter unter Verwaltung → Design.\n"
-            . ($extraCss !== '' ? " * Eigenes CSS: assets/css/site.css (Quelle) bzw. public/css/site.css (fertig) – lädt das CSS von fluid und ergänzt es.\n" : '')
-            . " */\n\nreturn " . self::php([
+            . ($global !== '' ? ($ownCss ? " * Eigenes CSS: css/kit.css ('css' – lädt zusätzlich zum CSS von fluid, nach dem CSS der Blöcke).\n"
+                : " * Eigenes CSS: assets/css/site.css (Quelle) bzw. public/css/site.css (fertig) – lädt das CSS von fluid und ergänzt es.\n") : '')
+            . ($parts ? " * CSS je Block: css/kd-{typ}.css ('conditional_css' – nur auf Seiten mit dem Block).\n" : '')
+            . ($bgs['list'] ? " * Abschnitts-Stile: 'backgrounds' – die Redaktion wählt sie unter Abschnitt → Hintergrund.\n" : '')
+            . " */\n\nreturn " . self::php(array_filter([
                 'extends' => KitDesigner::PARENT,
                 'label' => $label,
                 'description' => $desc,
                 'category' => 'general',
-                'version' => '0.1.' . max(0, (int) $draft['version'] - 1),
+                'version' => '0.' . (self::stage($draft) >= 2 ? '2' : '1') . '.' . max(0, (int) $draft['version'] - 1),
                 'requires' => '>=1.0.0',
+                'css' => $global !== '' && $ownCss ? ['css/kit.css'] : null,
+                'conditional_css' => $parts ? array_combine(array_map(fn($t) => 'css/kd-' . $t . '.css', array_keys($parts)), array_map(fn($t) => [(string) $t], array_keys($parts))) : null,
+                'backgrounds' => $bgs['list'] ?: null,
+                'dark_backgrounds' => $bgs['dark'] ? array_values(array_unique([...(array) (KitDesigner::parentTheme()->def['dark_backgrounds'] ?? []), ...$bgs['dark']])) : null,
                 'design_defaults' => $dd,
-            ]) . ";\n";
+            ], fn($v) => $v !== null)) . ";\n";
         $files = [
             'theme.php' => $php,
             'composer.json' => json_encode([
@@ -98,17 +112,27 @@ final class Exporter
                 'extra' => ['klxm-studio' => ['kit' => $name, 'public' => 'public', 'requires-core' => '>=1.0.0']],
             ], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n",
             'design-tokens.json' => json_encode(Tokens::export($draft), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n",
+            'kit-designer.json' => self::sourceJson($draft),
             'LICENSE' => self::license((string) ($meta['author'] ?? '')),
             'README.md' => self::readme($draft, 'studio', $dd),
             // Ordner public/ (fertige Assets) – ohne eigenes CSS nur dieser Hinweis; alles Übrige kommt von fluid
             'public/LIESMICH.txt' => "Fertige Assets des Kits „{$label}“. Fehlende Dateien kommen vom Eltern-Kit fluid.\n",
-            // Vorlagen kommen von fluid; eigene (z. B. templates/partials/header.php) hier ablegen
-            'templates/LIESMICH.txt' => "Vorlagen des Kits „{$label}“: leer – alle Vorlagen kommen von fluid. Eine Datei hier ersetzt die gleichnamige von fluid.\n",
         ];
-        if ($extraCss !== '') {
+        // Vorlagen kommen von fluid; ältere Cores verlangen den Ordner templates/ auch bei Kind-Kits (KitPackages::check)
+        if (!$ownCss) $files['templates/LIESMICH.txt'] = "Vorlagen des Kits „{$label}“: leer – alle Vorlagen kommen von fluid. Eine Datei hier ersetzt die gleichnamige von fluid.\n";
+        if ($global !== '' && $ownCss) {
+            $css = "/* Kit „" . self::comment($label) . "“ – eigenes CSS (Kit-Designer), lädt zusätzlich zum CSS von fluid. */\n" . $global . "\n";
+            $files['assets/css/kit.css'] = $css;
+            $files['public/css/kit.css'] = $css;
+        } elseif ($global !== '') {
             $head = "/* Kit „" . self::comment($label) . "“ – CSS von fluid plus abweichende Regeln (Kit-Designer) */\n";
-            $files['assets/css/site.css'] = $head . "@import \"../../../fluid/assets/css/site.css\";\n\n" . $extraCss . "\n";
-            $files['public/css/site.css'] = $head . "@import url(\"../../fluid/css/site.css\");\n\n" . $extraCss . "\n";
+            $files['assets/css/site.css'] = $head . "@import \"../../../fluid/assets/css/site.css\";\n\n" . $global . "\n";
+            $files['public/css/site.css'] = $head . "@import url(\"../../fluid/css/site.css\");\n\n" . $global . "\n";
+        }
+        foreach ($parts as $type => $css) {
+            $css = "/* Kit „" . self::comment($label) . "“ – Stile für den Block „{$type}“ (Kit-Designer), nur auf Seiten mit diesem Block. */\n" . $css . "\n";
+            $files["assets/css/kd-{$type}.css"] = $css;
+            $files["public/css/kd-{$type}.css"] = $css;
         }
         return $files;
     }
@@ -175,6 +199,17 @@ final class Exporter
             $defaults[$n] = is_array($v) ? [$v['default'], $v['dark']] : $v;
         }
         $extraCss = KitDesigner::extraCss((array) ($draft['data']['extra'] ?? []));
+        // REDAXO fluid kennt (noch) kein Token für die Zeilenhöhe: abweichende Werte als CSS
+        $lh = (float) (KitDesigner::normalize((array) ($draft['data']['values'] ?? []))['line_height'] ?? KitDesigner::PARENT_LINE_HEIGHT);
+        if ($extraCss === '' && KitDesigner::lineHeightToken() && abs($lh - KitDesigner::PARENT_LINE_HEIGHT) > 0.0001) {
+            $extraCss = 'body{line-height:' . rtrim(rtrim(number_format($lh, 3, '.', ''), '0'), '.') . '}';
+        }
+        unset($defaults['line_height']);
+        $styles = (array) ($draft['data']['styles'] ?? []);
+        $parts = Styles::cssParts($styles);
+        $global = trim(implode("\n", array_filter([$extraCss, $parts[''] ?? ''])));
+        unset($parts['']);
+        $bgs = Styles::backgrounds($styles, KitDesigner::normalize((array) ($draft['data']['values'] ?? [])));
         $q = fn(string $s) => str_replace(['\\', "'"], ['\\\\', "\\'"], $s);
         $date = date('Y-m-d');
         $kitClass = "<?php\n\nnamespace {$ns};\n\nuse Klxm\\Fluid\\AsKit;\nuse Klxm\\Fluid\\Kit;\n\n/**\n"
@@ -197,18 +232,42 @@ final class Exporter
             . "        if (is_array(\$value)) {\n            \$token['default'] = \$value[0];\n            if ('color' === (\$token['type'] ?? '')) {\n                \$token['dark'] = \$value[1];\n            }\n"
             . "        } else {\n            \$token['default'] = \$value;\n        }\n"
             . "    }\n    unset(\$token);\n}\nunset(\$group);\n\n"
-            . "return [\n    'label' => '{$q($label)}',\n    // Stylesheets für jede Seite – nach dem Grund- und Block-CSS des Eltern-Kits\n    'css' => ['css/kit.css'],\n    'design' => \$design,\n];\n";
+            . "return [\n    'label' => '{$q($label)}',\n    // Stylesheets für jede Seite – nach dem Grund- und Block-CSS des Eltern-Kits\n    'css' => ['css/kit.css'],\n"
+            . ($parts ? "    // CSS je Blocktyp (Kit-Designer) – nur auf Seiten mit dem Block\n    'assets' => " . self::php(array_combine(array_map(fn($t) => 'css/kd-' . $t . '.css', array_keys($parts)), array_map(fn($t) => [(string) $t], array_keys($parts))), 1) . ",\n" : '')
+            . ($bgs['list'] ? "    // Abschnitts-Stile (Kit-Designer): wählbar als Hintergrund eines Abschnitts\n    'backgrounds' => " . self::php($bgs['list'], 1) . ",\n" : '')
+            . ($bgs['dark'] ? "    'dark_backgrounds' => [...(\$parent['dark_backgrounds'] ?? []), ..." . self::php($bgs['dark']) . "],\n" : '')
+            . "    'design' => \$design,\n];\n";
         $css = "/*\n * Kit „" . self::comment($label) . "“ – eigenes CSS (Kit-Designer). Wird nach dem CSS von „Fluid“ (auch dem der Blöcke) geladen.\n"
             . " * Farben, Schriften und Formen stehen als Standardwerte in kit.php und bleiben im Style-Editor (Design) änderbar.\n */\n"
-            . ($extraCss !== '' ? "\n" . $extraCss . "\n" : '');
-        return [
+            . ($global !== '' ? "\n" . $global . "\n" : '');
+        $files = [
             $base . $class . 'Kit.php' => $kitClass,
             $base . 'kit.php' => $kitPhp,
             $base . 'assets/css/kit.css' => $css,
             $base . 'design-tokens.json' => json_encode(Tokens::export($draft), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n",
             $base . 'README.md' => self::readme($draft, 'redaxo', $dd, $ns . '\\' . $class . 'Kit'),
+            $base . 'kit-designer.json' => self::sourceJson($draft),
             $base . 'LICENSE' => self::license((string) ($draft['data']['meta']['author'] ?? '')),
         ];
+        foreach ($parts as $type => $css) {
+            $files[$base . "assets/css/kd-{$type}.css"] = "/* Kit „" . self::comment($label) . "“ – Stile für den Block „{$type}“ (Kit-Designer). */\n" . $css . "\n";
+        }
+        return $files;
+    }
+
+    /** Stufe des Entwurfs: 2, sobald Stile für Elemente, Blöcke oder Abschnitte da sind */
+    public static function stage(array $draft): int
+    {
+        $st = Styles::normalize((array) ($draft['data']['styles'] ?? []));
+        return $st['scopes'] || $st['sections'] ? 2 : 1;
+    }
+
+    /** Quelle des Entwurfs für den Import zum Weiterbearbeiten (kit-designer.json) */
+    public static function sourceJson(array $draft): string
+    {
+        $d = Drafts::clean((array) ($draft['data'] ?? []));
+        return json_encode(['format' => 'klxm-kit-designer', 'version' => 2, 'name' => (string) $draft['name'], 'label' => (string) $draft['label'],
+            'draft_version' => (int) $draft['version'], 'data' => $d], JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_UNESCAPED_UNICODE) . "\n";
     }
 
     // ------------------------------------------------------------------ ZIP
